@@ -382,6 +382,72 @@ describe('findNextItem (Drule)', () => {
   });
 });
 
+describe('findNextItem (Wrule)', () => {
+  const itemA: MultidimensionalStimulus = { a: [2, 0], d: 0, word: 'A' };
+  const itemB: MultidimensionalStimulus = { a: [0, 2], d: 0, word: 'B' };
+  const itemC: MultidimensionalStimulus = { a: [1.5, 1.5], d: 0, word: 'C' };
+
+  it('selects the item that maximizes weights^T * infoMatrix * weights', () => {
+    const cat = new MultidimensionalCat({ nDims: 2, itemSelect: 'wrule' });
+    // Hand-derived at theta=[0,0] with identity prior precision and default weights=[1,1]:
+    //   A -> M=[[2,0],[0,1]]         -> w^T M w = 3
+    //   B -> M=[[1,0],[0,2]]         -> w^T M w = 3
+    //   C -> M=[[1.5625,0.5625],[0.5625,1.5625]] -> w^T M w = 4.25
+    const { nextStimulus } = cat.findNextItem([itemA, itemB, itemC]);
+    expect(nextStimulus?.word).toBe('C');
+  });
+
+  it('excludes a dimension entirely when its weight is 0', () => {
+    const cat = new MultidimensionalCat({ nDims: 2, itemSelect: 'wrule', weights: [0, 1] });
+    // With weights=[0,1] (only dimension 1 counts): A -> 1, B -> 2, C -> 1.5625
+    const { nextStimulus } = cat.findNextItem([itemA, itemB, itemC]);
+    expect(nextStimulus?.word).toBe('B');
+  });
+
+  it('defaults weights to a vector of ones', () => {
+    const cat = new MultidimensionalCat({ nDims: 3 });
+    expect(cat.weights).toEqual([1, 1, 1]);
+  });
+
+  it('throws if weights has the wrong length', () => {
+    expect(() => new MultidimensionalCat({ nDims: 2, weights: [1] })).toThrow();
+  });
+});
+
+describe('findNextItem (KL)', () => {
+  const klScore = (klDelta: number, zeta: MultidimensionalZeta) => {
+    const p1 = multidimensionalItemResponseFunction([klDelta, klDelta], zeta);
+    const p0 = multidimensionalItemResponseFunction([-klDelta, -klDelta], zeta);
+    return p1 * Math.log(p1 / p0) + (1 - p1) * Math.log((1 - p1) / (1 - p0));
+  };
+
+  it('selects the item with the largest pointwise KL divergence around theta', () => {
+    const cat = new MultidimensionalCat({ nDims: 2, itemSelect: 'kl' });
+    const steepItem: MultidimensionalStimulus = { a: [3, 0], d: 0, word: 'steep' };
+    const flatItem: MultidimensionalStimulus = { a: [0.1, 0], d: 0, word: 'flat' };
+
+    expect(klScore(cat.klDelta, steepItem)).toBeGreaterThan(klScore(cat.klDelta, flatItem));
+
+    const { nextStimulus } = cat.findNextItem([flatItem, steepItem]);
+    expect(nextStimulus?.word).toBe('steep');
+  });
+
+  it('defaults klDelta to 0.1', () => {
+    const cat = new MultidimensionalCat({ nDims: 2 });
+    expect(cat.klDelta).toBe(0.1);
+  });
+
+  it('respects a custom klDelta', () => {
+    const cat = new MultidimensionalCat({ nDims: 2, itemSelect: 'kl', klDelta: 1.5 });
+    expect(cat.klDelta).toBe(1.5);
+  });
+
+  it('throws for a non-positive klDelta', () => {
+    expect(() => new MultidimensionalCat({ nDims: 2, klDelta: 0 })).toThrow();
+    expect(() => new MultidimensionalCat({ nDims: 2, klDelta: -0.1 })).toThrow();
+  });
+});
+
 describe('findNextItem (random)', () => {
   it('selects an item via the seeded RNG and removes it from remainingStimuli', () => {
     const cat = new MultidimensionalCat({ nDims: 2, itemSelect: 'random', randomSeed: 'test-seed' });
