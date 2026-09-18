@@ -307,6 +307,7 @@ export class Cat {
 
     if (arr.length >= this.nStartItems) {
       index += this.randomInteger(-Math.floor(this.nStartItems / 2), Math.floor(this.nStartItems / 2));
+      index = _clamp(index, 0, arr.length - 1);
     }
 
     const nextItem = arr[index];
