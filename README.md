@@ -294,6 +294,72 @@ const nextItem = clowder.updateCatAndGetNextItem({
 
 By integrating `Clowder`, your application can efficiently manage adaptive testing scenarios with robust trial and stimuli handling, multi-CAT configurations, and stopping conditions to ensure optimal performance.
 
+# Multidimensional CAT Usage Guide
+
+`Clowder` runs several independent *unidimensional* Cats side by side; each dimension is estimated on its own from its own items. `MultidimensionalCat` is different: it estimates a single vector of latent abilities (theta) **jointly** from a compensatory multidimensional IRT model, so a single item can inform several dimensions at once. This is the right tool for a fitted bifactor (or other compensatory MIRT) model, e.g. a general factor plus several specific factors.
+
+Item parameters follow [mirt](https://cran.r-project.org/package=mirt)'s own convention directly:
+
+```
+P(theta) = g + (u - g) / (1 + exp(-(a . theta + d)))
+```
+
+where `a` is the item's discrimination vector (one slope per dimension; `0` for dimensions it doesn't load on), `d` is the linear predictor intercept, `g` is the guessing/lower asymptote, and `u` is the upper asymptote. Coefficients pulled from `coef(mod)` in mirt/mirtCAT can be used as-is, without reparameterizing.
+
+## Example: bifactor CAT with a D-optimal item selection rule
+
+This mirrors a `mirtCAT` run with `criteria = "Drule"`, `method = "MAP"`, and a `design` list of `min_items`/`max_items`/`min_SEM`:
+
+```typescript
+import { MultidimensionalCat, checkMultidimensionalStopping, MultidimensionalStimulus } from '@bdelab/jscat';
+
+// Item bank fit as a bifactor model: each item loads on G plus exactly one
+// specific factor (S1_noun or S2_predicate), matching coef(mod) from mirt.
+const itemBank: MultidimensionalStimulus[] = [
+  { item_id: 'noun_01', a: [1.1, 1.2, 0], d: 0.4, g: 0.1, u: 1 },
+  { item_id: 'pred_01', a: [1.0, 0, 1.3], d: -0.2, g: 0.1, u: 1 },
+  // ...
+];
+
+const cat = new MultidimensionalCat({
+  nDims: 3, // [G, S1_noun, S2_predicate]
+  method: 'MAP',
+  itemSelect: 'Drule', // also used for start_item, since Drule is well-defined at 0 items
+});
+
+let remainingItems = itemBank;
+while (true) {
+  const { nextStimulus, remainingStimuli } = cat.findNextItem(remainingItems);
+  if (!nextStimulus) break;
+  remainingItems = remainingStimuli;
+
+  const answer = getResponseFromParticipant(nextStimulus); // 0 or 1
+  cat.updateAbilityEstimate(
+    { a: nextStimulus.a, d: nextStimulus.d, g: nextStimulus.g, u: nextStimulus.u },
+    answer,
+  );
+
+  const { stop } = checkMultidimensionalStopping(cat, {
+    minItems: 150, // don't stop early just because minSEM was reached quickly
+    maxItems: 200,
+    minSEM: [0.3, 0.42, 0.41], // per-dimension SE threshold: [G, S1_noun, S2_predicate]
+  });
+  if (stop) break;
+}
+
+// cat.theta is [G, S1_noun, S2_predicate]; cat.seMeasurement holds the matching per-dimension SEs.
+const biasScore = cat.theta[1] - cat.theta[2]; // S1_noun - S2_predicate
+```
+
+Notes on how this maps onto `mirtCAT`:
+
+- **`criteria`/`start_item = "Drule"`** &rarr; `itemSelect: 'Drule'` (default). At each step, it picks the item that maximizes the determinant of the resulting cumulative Fisher information matrix (prior precision + all administered items' information, evaluated at the current theta). This is well-defined even for the very first item because the prior precision (default: the identity matrix, i.e. independent unit-variance dimensions -- the usual assumption for an orthogonal bifactor model) keeps the base information matrix non-singular.
+- **`method = "MAP"`** &rarr; `method: 'MAP'` (default). `'MLE'` is also available as a lower-overhead alternative once there's enough information to avoid divergence, but has no informative-prior regularization.
+- **`design = list(min_items, max_items, min_SEM)`** &rarr; `checkMultidimensionalStopping(cat, { minItems, maxItems, minSEM })`. Like `Cat`/`Clowder`, `MultidimensionalCat` doesn't run the test loop itself; call this after each update and stop once it returns `{ stop: true }`.
+- **`local_pattern` / pre-collected response data** &rarr; not built in. Since this library doesn't run the loop for you, replaying a fixed response pattern is just a matter of driving `updateAbilityEstimate`/`findNextItem` from your own stored responses instead of live ones.
+
+Not yet supported (open areas for future work): non-D-optimal selection criteria (e.g. `Wrule`, KL information), EAP estimation for the multidimensional case, and correlated (non-orthogonal) prior covariance structures beyond what you supply directly via `priorCovariance`.
+
 ## References
 
 - Chalmers, R. P. (2012). mirt: A multidimensional item response theory package for the R environment. Journal of Statistical Software.
