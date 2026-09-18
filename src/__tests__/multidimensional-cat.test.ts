@@ -48,6 +48,34 @@ describe('MultidimensionalCat constructor', () => {
     expect(() => new MultidimensionalCat({ nDims: 2, itemSelect: 'mfi' })).toThrow();
   });
 
+  it('defaults minTheta/maxTheta to -6/6 on every dimension', () => {
+    const cat = new MultidimensionalCat({ nDims: 3 });
+    expect(cat.minTheta).toEqual([-6, -6, -6]);
+    expect(cat.maxTheta).toEqual([6, 6, 6]);
+  });
+
+  it('applies a scalar minTheta/maxTheta to every dimension', () => {
+    const cat = new MultidimensionalCat({ nDims: 3, minTheta: -3, maxTheta: 3 });
+    expect(cat.minTheta).toEqual([-3, -3, -3]);
+    expect(cat.maxTheta).toEqual([3, 3, 3]);
+  });
+
+  it('accepts an array of per-dimension minTheta/maxTheta bounds', () => {
+    const cat = new MultidimensionalCat({ nDims: 3, minTheta: [-1, -2, -3], maxTheta: [1, 2, 3] });
+    expect(cat.minTheta).toEqual([-1, -2, -3]);
+    expect(cat.maxTheta).toEqual([1, 2, 3]);
+  });
+
+  it('throws if a per-dimension minTheta/maxTheta array has the wrong length', () => {
+    expect(() => new MultidimensionalCat({ nDims: 3, minTheta: [-1, -2] })).toThrow();
+    expect(() => new MultidimensionalCat({ nDims: 3, maxTheta: [1, 2, 3, 4] })).toThrow();
+  });
+
+  it('throws if minTheta is not less than maxTheta on every dimension', () => {
+    expect(() => new MultidimensionalCat({ nDims: 2, minTheta: [1, -1], maxTheta: [2, -2] })).toThrow();
+    expect(() => new MultidimensionalCat({ nDims: 2, minTheta: 3, maxTheta: 3 })).toThrow();
+  });
+
   it('accepts a custom starting theta and prior', () => {
     const cat = new MultidimensionalCat({
       nDims: 2,
@@ -103,6 +131,22 @@ describe('updateAbilityEstimate', () => {
     cat.updateAbilityEstimate(items, items.map(() => 1 as const));
     expect(cat.theta[0]).toBeLessThanOrEqual(2);
     expect(cat.theta[1]).toBeLessThanOrEqual(2);
+  });
+
+  it('clamps each dimension to its own bound when given per-dimension minTheta/maxTheta', () => {
+    // Items alternate which single dimension they load on (d=0, so each is genuinely informative
+    // rather than already-near-certain), so each dimension's evidence is independent. With no
+    // bounds, 20 such items with all-correct answers push both dimensions to ~1.09 (verified
+    // separately); a maxTheta of 0.5 on dimension 0 only should clamp dimension 0 there while
+    // leaving dimension 1 free to reach its own (higher, unclamped) MAP estimate.
+    const cat = new MultidimensionalCat({ nDims: 2, minTheta: [-6, -6], maxTheta: [0.5, 6] });
+    const items: MultidimensionalZeta[] = Array.from({ length: 20 }, (_, i) => ({
+      a: i % 2 === 0 ? [3, 0] : [0, 3],
+      d: 0,
+    }));
+    cat.updateAbilityEstimate(items, items.map(() => 1 as const));
+    expect(cat.theta[0]).toBeCloseTo(0.5, 6);
+    expect(cat.theta[1]).toBeGreaterThan(0.5); // dimension 1's ceiling (6) shouldn't constrain it the same way
   });
 
   it('coerces string-valued zeta parameters to numbers', () => {
@@ -232,6 +276,23 @@ describe('findNextItem (Drule)', () => {
   it('throws if a candidate stimulus has the wrong dimensionality', () => {
     const cat = new MultidimensionalCat({ nDims: 2 });
     expect(() => cat.findNextItem([{ a: [1, 0, 0] }])).toThrow();
+  });
+
+  it('supports deepCopy=false, returning the same stimulus objects rather than clones', () => {
+    const cat = new MultidimensionalCat({ nDims: 2 });
+    const itemA: MultidimensionalStimulus = { a: [3, 3], d: 0, word: 'A' };
+    const itemB: MultidimensionalStimulus = { a: [1, 0], d: 0, word: 'B' };
+    const pool = [itemA, itemB];
+    const { nextStimulus, remainingStimuli } = cat.findNextItem(pool, undefined, false);
+    expect(nextStimulus).toBe(itemA); // same object reference, not a deep clone
+    expect(remainingStimuli[0]).toBe(itemB);
+  });
+
+  it('returns an undefined nextStimulus for an empty stimulus array', () => {
+    const cat = new MultidimensionalCat({ nDims: 2 });
+    const { nextStimulus, remainingStimuli } = cat.findNextItem([]);
+    expect(nextStimulus).toBeUndefined();
+    expect(remainingStimuli).toEqual([]);
   });
 });
 
