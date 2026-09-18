@@ -141,6 +141,21 @@ for (const format of ['symbolic', 'semantic'] as Array<'symbolic' | 'semantic'>)
       expect(received).toEqual(expected);
     });
 
+    it('does not go out of bounds when nStartItems equals the pool size (middle method)', () => {
+      const pool: Stimulus[] = Array.from({ length: 10 }, (_, i) => ({
+        ...convertZeta({ a: 1, b: i - 5, c: 0.2, d: 1 }, format),
+        word: `item-${i}`,
+      }));
+
+      for (let seed = 0; seed < 50; seed++) {
+        const cat = new Cat({ nStartItems: 10, startSelect: 'middle', randomSeed: `seed-${seed}` });
+        const { nextStimulus, remainingStimuli } = cat.findNextItem(pool, undefined, true);
+        expect(nextStimulus).toBeDefined();
+        expect(pool.map((s) => s.word)).toContain(nextStimulus!.word);
+        expect(remainingStimuli.length).toBe(pool.length - 1);
+      }
+    });
+
     it.each`
       deepCopy
       ${true}
