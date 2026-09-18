@@ -19,8 +19,8 @@ export interface MultidimensionalCatInput {
   nStartItems?: number;
   startSelect?: string;
   theta?: number[];
-  minTheta?: number;
-  maxTheta?: number;
+  minTheta?: number | number[];
+  maxTheta?: number | number[];
   priorMean?: number[];
   priorCovariance?: Matrix;
   randomSeed?: string | null;
@@ -45,8 +45,8 @@ export class MultidimensionalCat {
   public itemSelect: string;
   public nStartItems: number;
   public startSelect: string;
-  public minTheta: number;
-  public maxTheta: number;
+  public minTheta: number[];
+  public maxTheta: number[];
   private readonly _priorMean: number[];
   private readonly _priorPrecision: Matrix;
   private readonly _zetas: MultidimensionalZeta[];
@@ -64,8 +64,10 @@ export class MultidimensionalCat {
    *     nStartItems: first n trials to keep non-adaptive selection
    *     startSelect: rule to select first n trials, default = itemSelect
    *     theta: initial theta estimate vector, default = a vector of zeros
-   *     minTheta: lower bound applied to every dimension of theta
-   *     maxTheta: upper bound applied to every dimension of theta
+   *     minTheta: lower bound on theta -- a single number applied to every dimension,
+   *       or an array giving a separate lower bound per dimension
+   *     maxTheta: upper bound on theta -- a single number applied to every dimension,
+   *       or an array giving a separate upper bound per dimension
    *     priorMean: the mean vector of the (multivariate normal) prior, default = zeros
    *     priorCovariance: the covariance matrix of the prior, default = the identity matrix
    *       (i.e. independent, unit-variance dimensions -- the usual assumption for an
@@ -96,8 +98,15 @@ export class MultidimensionalCat {
     this.itemSelect = MultidimensionalCat.validateItemSelect(itemSelect);
     this.startSelect = MultidimensionalCat.validateItemSelect(startSelect ?? itemSelect);
     this.nStartItems = nStartItems;
-    this.minTheta = minTheta;
-    this.maxTheta = maxTheta;
+    this.minTheta = MultidimensionalCat.normalizeBounds(minTheta, nDims, 'minTheta');
+    this.maxTheta = MultidimensionalCat.normalizeBounds(maxTheta, nDims, 'maxTheta');
+    this.minTheta.forEach((min, i) => {
+      if (min >= this.maxTheta[i]) {
+        throw new Error(
+          `minTheta must be less than maxTheta on every dimension. On dimension ${i}, received minTheta=${min}, maxTheta=${this.maxTheta[i]}.`,
+        );
+      }
+    });
 
     this._zetas = [];
     this._resps = [];
@@ -182,6 +191,21 @@ export class MultidimensionalCat {
   }
 
   /**
+   * Normalize a minTheta/maxTheta constructor input -- either a single number
+   * (applied to every dimension) or an array of per-dimension bounds -- into
+   * an array of length nDims.
+   */
+  private static normalizeBounds(value: number | number[], nDims: number, paramName: string): number[] {
+    if (Array.isArray(value)) {
+      if (value.length !== nDims) {
+        throw new Error(`${paramName} must have length nDims (${nDims}) when given as an array. Received length ${value.length}.`);
+      }
+      return [...value];
+    }
+    return new Array(nDims).fill(value);
+  }
+
+  /**
    * Use previous response patterns and item params to update the joint
    * ability estimate (theta vector) based on a defined method.
    * @param zeta - last item param(s)
@@ -208,7 +232,7 @@ export class MultidimensionalCat {
     this._resps.push(...answerArr);
 
     const estimate = method === 'map' ? this.estimateAbilityMAP() : this.estimateAbilityMLE();
-    this._theta = estimate.map((value) => _clamp(value, this.minTheta, this.maxTheta));
+    this._theta = estimate.map((value, i) => _clamp(value, this.minTheta[i], this.maxTheta[i]));
     this.calculateSE();
   }
 

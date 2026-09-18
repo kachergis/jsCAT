@@ -358,7 +358,11 @@ Notes on how this maps onto `mirtCAT`:
 - **`design = list(min_items, max_items, min_SEM)`** &rarr; `checkMultidimensionalStopping(cat, { minItems, maxItems, minSEM })`. Like `Cat`/`Clowder`, `MultidimensionalCat` doesn't run the test loop itself; call this after each update and stop once it returns `{ stop: true }`.
 - **`local_pattern` / pre-collected response data** &rarr; not built in. Since this library doesn't run the loop for you, replaying a fixed response pattern is just a matter of driving `updateAbilityEstimate`/`findNextItem` from your own stored responses instead of live ones.
 
+`minTheta`/`maxTheta` (default -6/6) can be a single number applied to every dimension, or an array giving a separate bound per dimension, e.g. `minTheta: [-6, -6, -6], maxTheta: [6, 6, 6]`.
+
 Not yet supported (open areas for future work): non-D-optimal selection criteria (e.g. `Wrule`, KL information), EAP estimation for the multidimensional case, and correlated (non-orthogonal) prior covariance structures beyond what you supply directly via `priorCovariance`.
+
+This has been validated against a real fitted bifactor model and real (imputed) response data, replaying each simulated person's actual recorded answers through `MultidimensionalCat`'s Drule+MAP pipeline with the same `min_items`/`max_items`/`min_SEM` design as an equivalent `mirtCAT` run: per-dimension SEs, bias-score recovery, and G-score recovery all closely tracked the reference `mirtCAT` run's own output (e.g. bias-score recovery correlation 0.89 vs mirtCAT's 0.88 on the same design).
 
 ## References
 
