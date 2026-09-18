@@ -44,8 +44,13 @@ describe('MultidimensionalCat constructor', () => {
   });
 
   it('throws for an invalid method or itemSelect', () => {
-    expect(() => new MultidimensionalCat({ nDims: 2, method: 'eap' })).toThrow();
+    expect(() => new MultidimensionalCat({ nDims: 2, method: 'staircase' })).toThrow();
     expect(() => new MultidimensionalCat({ nDims: 2, itemSelect: 'mfi' })).toThrow();
+  });
+
+  it('accepts method="eap"', () => {
+    const cat = new MultidimensionalCat({ nDims: 2, method: 'eap' });
+    expect(cat.method).toBe('eap');
   });
 
   it('defaults minTheta/maxTheta to -6/6 on every dimension', () => {
@@ -212,6 +217,87 @@ describe('estimateAbilityMLE', () => {
     );
     expect(cat.theta[0]).toBeGreaterThan(0);
     expect(cat.theta[1]).toBeLessThan(0);
+  });
+});
+
+describe('estimateAbilityEAP', () => {
+  it('computes the posterior mean and SD, verified against an independent finer grid', () => {
+    const cat = new MultidimensionalCat({ nDims: 2, method: 'eap', randomSeed: 'eap-test' });
+    const items: MultidimensionalZeta[] = [
+      { a: [1.8, 0], d: 0.3 },
+      { a: [0, 1.5], d: -0.2 },
+      { a: [1.2, 1.0], d: 0.1 },
+      { a: [2.0, 0.5], d: -0.4 },
+    ];
+    const answers: (0 | 1)[] = [1, 0, 1, 1];
+    cat.updateAbilityEstimate(items, answers);
+
+    // Independent (finer, separately implemented) grid computation of the same
+    // posterior mean/SD under the default N(0, I) prior, truncated to [-6, 6].
+    const step = 0.05;
+    let sumW = 0;
+    let sumT0 = 0;
+    let sumT1 = 0;
+    const grid: { t0: number; t1: number; w: number }[] = [];
+    for (let t0 = -6; t0 <= 6; t0 += step) {
+      for (let t1 = -6; t1 <= 6; t1 += step) {
+        const logLik = items.reduce((acc, zeta, i) => {
+          const p = multidimensionalItemResponseFunction([t0, t1], zeta);
+          return acc + (answers[i] === 1 ? Math.log(p) : Math.log(1 - p));
+        }, 0);
+        const logPrior = -0.5 * (t0 * t0 + t1 * t1);
+        const w = Math.exp(logLik + logPrior);
+        grid.push({ t0, t1, w });
+        sumW += w;
+        sumT0 += t0 * w;
+        sumT1 += t1 * w;
+      }
+    }
+    const meanT0 = sumT0 / sumW;
+    const meanT1 = sumT1 / sumW;
+    const varT0 = grid.reduce((acc, g) => acc + Math.pow(g.t0 - meanT0, 2) * g.w, 0) / sumW;
+    const varT1 = grid.reduce((acc, g) => acc + Math.pow(g.t1 - meanT1, 2) * g.w, 0) / sumW;
+
+    expect(cat.theta[0]).toBeCloseTo(meanT0, 1);
+    expect(cat.theta[1]).toBeCloseTo(meanT1, 1);
+    expect(cat.seMeasurement[0]).toBeCloseTo(Math.sqrt(varT0), 1);
+    expect(cat.seMeasurement[1]).toBeCloseTo(Math.sqrt(varT1), 1);
+  });
+
+  it('equals the prior mean and SD before any items are administered', () => {
+    const cat = new MultidimensionalCat({ nDims: 2, method: 'eap' });
+    cat.updateAbilityEstimate([], []);
+    expect(cat.theta[0]).toBeCloseTo(0, 1);
+    expect(cat.theta[1]).toBeCloseTo(0, 1);
+    expect(cat.seMeasurement[0]).toBeCloseTo(1, 1);
+    expect(cat.seMeasurement[1]).toBeCloseTo(1, 1);
+  });
+
+  it('moves theta toward the dimension(s) an item loads on, in the direction of the response', () => {
+    const cat = new MultidimensionalCat({ nDims: 2, method: 'eap' });
+    cat.updateAbilityEstimate({ a: [2, 0], d: 0 }, 1);
+    expect(cat.theta[0]).toBeGreaterThan(0);
+    expect(cat.theta[1]).toBeCloseTo(0, 1); // no information on dimension 1 -> stays at the prior mean
+  });
+
+  it('respects a custom quadPoints setting', () => {
+    const cat = new MultidimensionalCat({ nDims: 2, method: 'eap', quadPoints: 11 });
+    expect(cat.quadPoints).toBe(11);
+    cat.updateAbilityEstimate({ a: [2, 0], d: 0 }, 1);
+    expect(cat.theta[0]).toBeGreaterThan(0);
+  });
+
+  it('throws for an invalid quadPoints', () => {
+    expect(() => new MultidimensionalCat({ nDims: 2, quadPoints: 1 })).toThrow();
+    expect(() => new MultidimensionalCat({ nDims: 2, quadPoints: 4.5 })).toThrow();
+  });
+
+  it('defaults quadPoints so the total grid size stays roughly constant across nDims', () => {
+    const cat2 = new MultidimensionalCat({ nDims: 2 });
+    const cat3 = new MultidimensionalCat({ nDims: 3 });
+    expect(cat2.quadPoints).toBeGreaterThan(cat3.quadPoints);
+    expect(Math.pow(cat2.quadPoints, 2)).toBeGreaterThan(1000);
+    expect(Math.pow(cat3.quadPoints, 3)).toBeGreaterThan(1000);
   });
 });
 

@@ -23,7 +23,13 @@ export interface MultidimensionalCatInput {
   maxTheta?: number | number[];
   priorMean?: number[];
   priorCovariance?: Matrix;
+  quadPoints?: number;
   randomSeed?: string | null;
+}
+
+interface QuadratureNode {
+  theta: number[];
+  priorWeight: number;
 }
 
 /**
@@ -47,6 +53,7 @@ export class MultidimensionalCat {
   public startSelect: string;
   public minTheta: number[];
   public maxTheta: number[];
+  public readonly quadPoints: number;
   private readonly _priorMean: number[];
   private readonly _priorPrecision: Matrix;
   private readonly _zetas: MultidimensionalZeta[];
@@ -54,6 +61,7 @@ export class MultidimensionalCat {
   private _theta: number[];
   private _seMeasurement: number[];
   private readonly _rng: ReturnType<seedrandom>;
+  private readonly _quadratureGrid: QuadratureNode[];
 
   /**
    * Create a MultidimensionalCat object.
@@ -72,6 +80,11 @@ export class MultidimensionalCat {
    *     priorCovariance: the covariance matrix of the prior, default = the identity matrix
    *       (i.e. independent, unit-variance dimensions -- the usual assumption for an
    *       orthogonal bifactor model)
+   *     quadPoints: number of quadrature points per dimension, used for EAP estimation
+   *       (only). Default scales down as nDims grows so the total grid size (quadPoints ^
+   *       nDims) stays roughly constant (~3000 points); override for more precision (at
+   *       the cost of nDims * quadPoints^nDims likelihood evaluations per EAP update) or
+   *       less.
    *     randomSeed: set a random seed to trace the simulation
    */
   constructor({
@@ -85,6 +98,7 @@ export class MultidimensionalCat {
     maxTheta = 6,
     priorMean,
     priorCovariance,
+    quadPoints,
     randomSeed = null,
   }: MultidimensionalCatInput) {
     if (!Number.isInteger(nDims) || nDims < 2) {
@@ -129,7 +143,39 @@ export class MultidimensionalCat {
     }
     this._priorPrecision = precision;
 
+    this.quadPoints = quadPoints ?? Math.max(5, Math.round(Math.pow(3000, 1 / nDims)));
+    if (!Number.isInteger(this.quadPoints) || this.quadPoints < 2) {
+      throw new Error(`quadPoints must be an integer of at least 2. Received ${this.quadPoints}.`);
+    }
+    this._quadratureGrid = this.buildQuadratureGrid();
+
     this._rng = randomSeed === null ? seedrandom() : seedrandom(randomSeed);
+  }
+
+  /**
+   * Build a fixed rectangular quadrature grid (the Cartesian product of
+   * `quadPoints` evenly spaced points per dimension, over [minTheta,
+   * maxTheta]), with each node weighted by the prior density there. Built
+   * once at construction since it doesn't depend on administered items;
+   * reused by every EAP estimate.
+   */
+  private buildQuadratureGrid(): QuadratureNode[] {
+    const perDimPoints = this.minTheta.map((min, i) => {
+      const max = this.maxTheta[i];
+      const step = (max - min) / (this.quadPoints - 1);
+      return Array.from({ length: this.quadPoints }, (_, k) => min + k * step);
+    });
+
+    let grid: number[][] = [[]];
+    perDimPoints.forEach((points) => {
+      const next: number[][] = [];
+      grid.forEach((partial) => {
+        points.forEach((point) => next.push([...partial, point]));
+      });
+      grid = next;
+    });
+
+    return grid.map((theta) => ({ theta, priorWeight: Math.exp(-this.negLogPriorDensity(theta)) }));
   }
 
   public get theta() {
@@ -174,7 +220,7 @@ export class MultidimensionalCat {
 
   private static validateMethod(method: string) {
     const lowerMethod = method.toLowerCase();
-    const validMethods: Array<string> = ['map', 'mle'];
+    const validMethods: Array<string> = ['map', 'mle', 'eap'];
     if (!validMethods.includes(lowerMethod)) {
       throw new Error('The abilityEstimator you provided is not in the list of valid methods');
     }
@@ -231,9 +277,16 @@ export class MultidimensionalCat {
     this._zetas.push(...zetaArr);
     this._resps.push(...answerArr);
 
-    const estimate = method === 'map' ? this.estimateAbilityMAP() : this.estimateAbilityMLE();
+    let estimate: number[];
+    if (method === 'map') {
+      estimate = this.estimateAbilityMAP();
+    } else if (method === 'eap') {
+      estimate = this.estimateAbilityEAP();
+    } else {
+      estimate = this.estimateAbilityMLE();
+    }
     this._theta = estimate.map((value, i) => _clamp(value, this.minTheta[i], this.maxTheta[i]));
-    this.calculateSE();
+    this.calculateSE(method);
   }
 
   private estimateAbilityMAP(): number[] {
@@ -246,6 +299,34 @@ export class MultidimensionalCat {
     const theta0 = [...this._theta];
     const solution = minimize_Powell(this.negLogLikelihood.bind(this), theta0);
     return solution.argument;
+  }
+
+  /**
+   * EAP: the posterior mean, evaluated by summation over the fixed
+   * quadrature grid built at construction time. Each node's weight is its
+   * prior density times the likelihood of the administered responses there;
+   * theta_EAP is the weight-averaged grid point.
+   */
+  private estimateAbilityEAP(): number[] {
+    const weights = this.quadratureWeights();
+    const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+
+    const weightedSum = new Array(this.nDims).fill(0);
+    this._quadratureGrid.forEach((node, i) => {
+      node.theta.forEach((value, d) => {
+        weightedSum[d] += value * weights[i];
+      });
+    });
+    return weightedSum.map((sum) => sum / totalWeight);
+  }
+
+  /**
+   * The (unnormalized) posterior weight -- prior density times response
+   * likelihood -- at every quadrature grid node, given the responses
+   * administered so far.
+   */
+  private quadratureWeights(): number[] {
+    return this._quadratureGrid.map((node) => Math.exp(this.logLikelihood(node.theta)) * node.priorWeight);
   }
 
   private negLogLikelihood(thetaArr: number[]): number {
@@ -276,16 +357,39 @@ export class MultidimensionalCat {
   }
 
   /**
-   * Calculate the standard error of measurement for each dimension, as the
-   * square root of the diagonal of the inverse of the cumulative information
-   * matrix. Falls back to Number.MAX_VALUE for every dimension if the
-   * information matrix isn't (yet) invertible.
+   * Calculate the standard error of measurement for each dimension.
+   *
+   * For MAP/MLE, this is the square root of the diagonal of the inverse of
+   * the cumulative (observed) information matrix -- the usual asymptotic
+   * approximation -- falling back to Number.MAX_VALUE for every dimension if
+   * that matrix isn't (yet) invertible.
+   *
+   * For EAP, this is the actual posterior standard deviation on the
+   * quadrature grid (the square root of the posterior variance around
+   * theta_EAP), which doesn't rely on that asymptotic approximation.
    */
-  private calculateSE() {
+  private calculateSE(method: string) {
+    if (method === 'eap') {
+      this._seMeasurement = this.calculatePosteriorSD();
+      return;
+    }
     const covariance = inverse(this.infoMatrix);
     this._seMeasurement = covariance
       ? covariance.map((row, i) => Math.sqrt(Math.max(row[i], 0)))
       : new Array(this.nDims).fill(Number.MAX_VALUE);
+  }
+
+  private calculatePosteriorSD(): number[] {
+    const weights = this.quadratureWeights();
+    const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+
+    const weightedSquaredDiff = new Array(this.nDims).fill(0);
+    this._quadratureGrid.forEach((node, i) => {
+      node.theta.forEach((value, d) => {
+        weightedSquaredDiff[d] += Math.pow(value - this._theta[d], 2) * weights[i];
+      });
+    });
+    return weightedSquaredDiff.map((sum) => Math.sqrt(sum / totalWeight));
   }
 
   /**
