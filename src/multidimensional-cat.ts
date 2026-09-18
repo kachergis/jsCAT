@@ -24,6 +24,8 @@ export interface MultidimensionalCatInput {
   priorMean?: number[];
   priorCovariance?: Matrix;
   quadPoints?: number;
+  weights?: number[];
+  klDelta?: number;
   randomSeed?: string | null;
 }
 
@@ -54,6 +56,8 @@ export class MultidimensionalCat {
   public minTheta: number[];
   public maxTheta: number[];
   public readonly quadPoints: number;
+  public readonly weights: number[];
+  public readonly klDelta: number;
   private readonly _priorMean: number[];
   private readonly _priorPrecision: Matrix;
   private readonly _zetas: MultidimensionalZeta[];
@@ -68,7 +72,11 @@ export class MultidimensionalCat {
    * @param {{nDims: number, method: string, itemSelect: string, nStartItems: number, startSelect: string, theta: number[], minTheta: number, maxTheta: number, priorMean: number[], priorCovariance: Matrix, randomSeed: string | null}} destructuredParam
    *     nDims: the number of latent dimensions to estimate jointly
    *     method: ability estimator, "MAP" or "MLE", default = 'MAP'
-   *     itemSelect: the method of item selection, "Drule" or "random", default = 'Drule'
+   *     itemSelect: the method of item selection, one of "Drule" (D-optimal: maximize the
+   *       determinant of the resulting information matrix), "Wrule" (weighted information:
+   *       maximize w^T * infoMatrix * w for the `weights` vector w), "KL" (pointwise
+   *       Kullback-Leibler: maximize the divergence between each candidate item's response
+   *       distribution at theta+klDelta vs theta-klDelta), or "random". Default = 'Drule'
    *     nStartItems: first n trials to keep non-adaptive selection
    *     startSelect: rule to select first n trials, default = itemSelect
    *     theta: initial theta estimate vector, default = a vector of zeros
@@ -85,6 +93,12 @@ export class MultidimensionalCat {
    *       nDims) stays roughly constant (~3000 points); override for more precision (at
    *       the cost of nDims * quadPoints^nDims likelihood evaluations per EAP update) or
    *       less.
+   *     weights: the weight vector used by "Wrule" item selection (w^T * infoMatrix * w).
+   *       Default weights every dimension equally (a vector of ones), e.g. to prioritize
+   *       resolving specific dimensions and ignore a general one, pass 0 for its weight.
+   *     klDelta: the theta perturbation used by "KL" item selection (compares each
+   *       candidate item's response distribution at theta+klDelta vs theta-klDelta,
+   *       applied to every dimension). Default 0.1.
    *     randomSeed: set a random seed to trace the simulation
    */
   constructor({
@@ -99,6 +113,8 @@ export class MultidimensionalCat {
     priorMean,
     priorCovariance,
     quadPoints,
+    weights,
+    klDelta = 0.1,
     randomSeed = null,
   }: MultidimensionalCatInput) {
     if (!Number.isInteger(nDims) || nDims < 2) {
@@ -148,6 +164,16 @@ export class MultidimensionalCat {
       throw new Error(`quadPoints must be an integer of at least 2. Received ${this.quadPoints}.`);
     }
     this._quadratureGrid = this.buildQuadratureGrid();
+
+    if (weights !== undefined && weights.length !== nDims) {
+      throw new Error(`weights must have length nDims (${nDims}). Received length ${weights.length}.`);
+    }
+    this.weights = weights ? [...weights] : new Array(nDims).fill(1);
+
+    if (klDelta <= 0) {
+      throw new Error(`klDelta must be a positive number. Received ${klDelta}.`);
+    }
+    this.klDelta = klDelta;
 
     this._rng = randomSeed === null ? seedrandom() : seedrandom(randomSeed);
   }
@@ -229,7 +255,7 @@ export class MultidimensionalCat {
 
   private static validateItemSelect(itemSelect: string) {
     const lowerItemSelect = itemSelect.toLowerCase();
-    const validItemSelect: Array<string> = ['drule', 'random'];
+    const validItemSelect: Array<string> = ['drule', 'wrule', 'kl', 'random'];
     if (!validItemSelect.includes(lowerItemSelect)) {
       throw new Error('The itemSelector you provided is not in the list of valid methods');
     }
@@ -416,8 +442,28 @@ export class MultidimensionalCat {
 
     if (selector === 'random') {
       return this.selectorRandom(arr);
+    } else if (selector === 'wrule') {
+      return this.selectorWrule(arr);
+    } else if (selector === 'kl') {
+      return this.selectorKL(arr);
     }
     return this.selectorDrule(arr);
+  }
+
+  /**
+   * Pick the item maximizing `score`, and return the rest sorted by score
+   * descending. Shared by every non-random selector: each just supplies its
+   * own per-item scoring function.
+   */
+  private selectByScore(arr: MultidimensionalStimulus[], score: (stim: MultidimensionalStimulus) => number) {
+    const withScore = arr.map((stim) => ({ stim, score: score(stim) }));
+    withScore.sort((a, b) => b.score - a.score);
+
+    const [chosen, ...rest] = withScore;
+    return {
+      nextStimulus: chosen?.stim,
+      remainingStimuli: rest.map((entry) => entry.stim),
+    };
   }
 
   /**
@@ -430,17 +476,50 @@ export class MultidimensionalCat {
    */
   private selectorDrule(arr: MultidimensionalStimulus[]) {
     const currentInfo = this.infoMatrix;
-    const withDeterminant = arr.map((stim) => ({
-      stim,
-      det: determinant(addMatrix(currentInfo, multidimensionalFisherInformation(this._theta, stim))),
-    }));
-    withDeterminant.sort((a, b) => b.det - a.det);
+    return this.selectByScore(arr, (stim) =>
+      determinant(addMatrix(currentInfo, multidimensionalFisherInformation(this._theta, stim))),
+    );
+  }
 
-    const [chosen, ...rest] = withDeterminant;
-    return {
-      nextStimulus: chosen?.stim,
-      remainingStimuli: rest.map((entry) => entry.stim),
-    };
+  /**
+   * Weighted information item selection: pick the item that maximizes
+   * `weights^T * infoMatrix * weights`, for the resulting information
+   * matrix (same base as Drule -- cumulative information, including the
+   * candidate item). Unlike Drule's determinant, this is a directional
+   * criterion: with the default all-ones weights it favors items informative
+   * across every dimension combined, and zeroing a dimension's weight (e.g.
+   * to prioritize specific factors over a general one) excludes it entirely.
+   */
+  private selectorWrule(arr: MultidimensionalStimulus[]) {
+    const currentInfo = this.infoMatrix;
+    return this.selectByScore(arr, (stim) => {
+      const combined = addMatrix(currentInfo, multidimensionalFisherInformation(this._theta, stim));
+      const weighted = combined.map((row) => dot(row, this.weights));
+      return dot(this.weights, weighted);
+    });
+  }
+
+  /**
+   * Pointwise Kullback-Leibler item selection: pick the item that maximizes
+   * the KL divergence between its response distribution at theta+klDelta and
+   * at theta-klDelta (applied to every dimension). Unlike Drule/Wrule, this
+   * doesn't reference the cumulative information matrix at all -- it only
+   * looks at how much each candidate item's own response probabilities
+   * change in a small neighborhood of the current theta estimate.
+   */
+  private selectorKL(arr: MultidimensionalStimulus[]) {
+    const thetaLow = this._theta.map((value) => value - this.klDelta);
+    const thetaHigh = this._theta.map((value) => value + this.klDelta);
+    const epsilon = 1e-12;
+    const clamp01 = (p: number) => Math.min(Math.max(p, epsilon), 1 - epsilon);
+
+    return this.selectByScore(arr, (stim) => {
+      const p1 = clamp01(multidimensionalItemResponseFunction(thetaHigh, stim));
+      const p0 = clamp01(multidimensionalItemResponseFunction(thetaLow, stim));
+      const q1 = 1 - p1;
+      const q0 = 1 - p0;
+      return p1 * Math.log(p1 / p0) + q1 * Math.log(q1 / q0);
+    });
   }
 
   private selectorRandom(arr: MultidimensionalStimulus[]) {
