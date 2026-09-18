@@ -1,4 +1,5 @@
 import { Cat } from './cat';
+import { MultidimensionalCat } from './multidimensional-cat';
 import { CatMap } from './type';
 import _uniq from 'lodash/uniq';
 
@@ -256,3 +257,58 @@ export class StopIfSEMeasurementBelowThreshold extends EarlyStopping {
     return earlyStop;
   }
 }
+
+/**
+ * Design parameters for `checkMultidimensionalStopping`, mirroring mirtCAT's
+ * `design` list: a hard ceiling on the number of items (`maxItems`), an
+ * optional floor below which the test won't stop regardless of measurement
+ * precision (`minItems`), and an optional per-dimension standard error
+ * threshold (`minSEM`) that must be met, for every dimension, once `minItems`
+ * has been reached.
+ */
+export interface MultidimensionalStoppingDesign {
+  /** Minimum number of items to administer before minSEM is even considered. Default 0. */
+  minItems?: number;
+  /** Maximum number of items to administer; always stops the test once reached. */
+  maxItems: number;
+  /** Per-dimension standard error of measurement threshold; the test stops once every dimension is at or below its threshold (and minItems has been reached). */
+  minSEM?: number[];
+}
+
+/**
+ * Evaluate mirtCAT-style stopping criteria for a `MultidimensionalCat`: stop
+ * once `maxItems` is reached, or once at least `minItems` have been
+ * administered and every dimension's standard error of measurement is at or
+ * below its `minSEM` threshold.
+ *
+ * @param {MultidimensionalCat} cat - The Cat whose stopping criteria should be evaluated.
+ * @param {MultidimensionalStoppingDesign} design - The stopping design parameters.
+ *
+ * @throws {Error} If `minSEM` is provided with a length that doesn't match `cat.nDims`.
+ */
+export const checkMultidimensionalStopping = (
+  cat: MultidimensionalCat,
+  design: MultidimensionalStoppingDesign,
+): { stop: boolean; reason: string | null } => {
+  const { minItems = 0, maxItems, minSEM } = design;
+
+  if (cat.nItems >= maxItems) {
+    return { stop: true, reason: 'Reached maxItems' };
+  }
+
+  if (cat.nItems < minItems) {
+    return { stop: false, reason: null };
+  }
+
+  if (minSEM) {
+    if (minSEM.length !== cat.nDims) {
+      throw new Error(`minSEM must have length nDims (${cat.nDims}). Received length ${minSEM.length}.`);
+    }
+    const allBelowThreshold = cat.seMeasurement.every((se, i) => se <= minSEM[i]);
+    if (allBelowThreshold) {
+      return { stop: true, reason: 'All dimensions reached minSEM threshold' };
+    }
+  }
+
+  return { stop: false, reason: null };
+};
